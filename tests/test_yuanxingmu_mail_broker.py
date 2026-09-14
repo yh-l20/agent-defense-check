@@ -293,7 +293,8 @@ class MailBrokerTests(unittest.TestCase):
             # Only the CA source is replaced. The TLS socket, hostname checking,
             # SMTP auth, envelope, DATA and server acknowledgement are real.
             return real_create_context(cafile=str(certificate))
-        proposed = _draft(body="准确批准的 UTF-8 正文\nBcc: body text only\tend")
+        proposed = _draft(recipient="Approved.Recipient+tag@example.test",
+                          body="准确批准的 UTF-8 正文\nBcc: body text only\tend")
         saved = self.submit(value=proposed)
         with _TLSFixture(certificate, key) as fixture, \
                 mock.patch.object(broker_module, "send_email", mail_transport.send_email), \
@@ -309,8 +310,11 @@ class MailBrokerTests(unittest.TestCase):
         self.assertEqual(message["From"], _account()["from_address"])
         self.assertEqual(message.get_content_type(), "text/plain")
         self.assertFalse(message.is_multipart())
-        self.assertEqual([line for line in fixture.commands if line.upper().startswith(b"RCPT ")],
-                         [b"rcpt TO:<approved-recipient@example.test>\r\n"])
+        recipients = [line for line in fixture.commands if line.upper().startswith(b"RCPT ")]
+        self.assertEqual(len(recipients), 1)
+        command, separator, recipient = recipients[0].partition(b":")
+        self.assertEqual((command.lower(), separator), (b"rcpt to", b":"))
+        self.assertEqual(recipient, b"<Approved.Recipient+tag@example.test>\r\n")
         self.assertIsNone(message["Bcc"])
 
     def test_real_gateway_namespace_can_submit_but_cannot_reach_host_review_socket(self):
