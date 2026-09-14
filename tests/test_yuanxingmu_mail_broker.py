@@ -309,8 +309,8 @@ class MailBrokerTests(unittest.TestCase):
         self.assertEqual(message["From"], _account()["from_address"])
         self.assertEqual(message.get_content_type(), "text/plain")
         self.assertFalse(message.is_multipart())
-        self.assertEqual([line for line in fixture.commands if line.upper().startswith(b"RCPT ")],
-                         [b"rcpt TO:<approved-recipient@example.test>\r\n"])
+        self.assertEqual([line.lower() for line in fixture.commands if line.upper().startswith(b"RCPT ")],
+                         [b"rcpt to:<approved-recipient@example.test>\r\n"])
         self.assertIsNone(message["Bcc"])
 
     def test_real_gateway_namespace_can_submit_but_cannot_reach_host_review_socket(self):

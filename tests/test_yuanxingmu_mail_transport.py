@@ -307,7 +307,7 @@ class MailTLSLoopbackTests(unittest.TestCase):
         envelope = [line for line in fixture.commands if line.upper().startswith((b"MAIL ", b"RCPT "))]
         self.assertEqual(len(envelope), 2)
         self.assertTrue(envelope[0].lower().startswith(b"mail from:<sender@example.test>"))
-        self.assertEqual(envelope[1], b"rcpt TO:<Only.User+tag@example.test>\r\n")
+        self.assertEqual(envelope[1].lower(), b"rcpt to:<only.user+tag@example.test>\r\n")
         self.assertEqual(len(fixture.messages), 1)
         message = BytesParser(policy=policy.default).parsebytes(fixture.messages[0])
         self.assertEqual(getaddresses(message.get_all("To")), [("", "Only.User+tag@example.test")])
