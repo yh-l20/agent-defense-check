@@ -113,20 +113,30 @@ def save(root: Path, state: dict):
     atomic(root / MARKER, (json.dumps(state, ensure_ascii=False, indent=2) + "\n").encode())
 
 
-def check_environment(root: Path):
+def check_environment(root: Path, *, experimental_debian13=False, system_deps=False):
+    if experimental_debian13 and system_deps:
+        raise InstallError("Debian 13 实验验收只接受系统依赖已就绪的环境，不能使用 --system-deps。")
     if not sys.platform.startswith("linux") or platform.machine() != "x86_64":
-        raise InstallError("这版安装器适用于 Ubuntu 24.04 / WSL Ubuntu 24.04 的 x86_64 电脑。")
+        raise InstallError("安装器要求 Linux x86_64；默认支持 Ubuntu/WSL Ubuntu 24.04，Debian 13 仅供显式实验验收。")
     if sys.version_info < (3, 12) or not Path(sys.executable).resolve().is_relative_to("/usr"):
-        raise InstallError("请用 Ubuntu 自带的 /usr/bin/python3（3.12 或更新版本）运行安装器。")
+        raise InstallError("请用 Linux 系统的 /usr/bin/python3（3.12 或更新版本）运行安装器。")
     if os.geteuid() == 0:
-        raise InstallError("请以自己的 Ubuntu 用户运行安装器，不要在整条命令前加 sudo。")
+        raise InstallError("请以自己的 Linux 用户运行安装器，不要在整条命令前加 sudo。")
     release = {}
     for line in Path("/etc/os-release").read_text().splitlines():
         key, separator, value = line.partition("=")
         if separator:
             release[key] = value.strip('"')
-    if release.get("ID") != "ubuntu" or release.get("VERSION_ID") != "24.04":
-        raise InstallError("当前只验证了 Ubuntu 24.04；其他发行版请使用手工安装指南。")
+    if experimental_debian13:
+        if (release.get("ID"), release.get("VERSION_ID")) != ("debian", "13"):
+            raise InstallError("--experimental-debian13 仅用于 Debian 13 的候选验收。")
+        if (sys.version_info[:2] != (3, 13)
+                or Path(sys.executable).resolve() != Path("/usr/bin/python3").resolve()):
+            raise InstallError("Debian 13 实验验收须用 /usr/bin/python3 指向的系统 Python 3.13。")
+        if not Path("/usr/bin/bwrap").is_file():
+            raise InstallError("Debian 13 实验验收要求预先准备 /usr/bin/bwrap；本入口不会安装系统依赖。")
+    elif (release.get("ID"), release.get("VERSION_ID")) != ("ubuntu", "24.04"):
+        raise InstallError("当前发布版只验证了 Ubuntu 24.04；Debian 13 候选验收需显式 --experimental-debian13。")
     home = Path.home().absolute()
     if (".." in root.parts or root.resolve() != root or root == home
             or not root.is_relative_to(home) or root.is_relative_to("/mnt")):
@@ -139,8 +149,10 @@ def check_environment(root: Path):
 
 
 @contextmanager
-def installation(root: Path, *, features=(), development=None):
+def installation(root: Path, *, features=(), development=None, experimental_platform=None):
     import fcntl
+    if experimental_platform not in (None, "debian13"):
+        raise InstallError("未知的实验安装范围。")
     if not root.exists():
         # A failed mkdir or missing initial receipt never authorizes adoption.
         root.mkdir(mode=0o700)
@@ -150,6 +162,8 @@ def installation(root: Path, *, features=(), development=None):
                  "status": "installing", "components": {}, "files": {}, "features": list(features)}
         if development is not None:
             state["development_wheel"] = development
+        if experimental_platform is not None:
+            state["experimental_platform"] = experimental_platform
         save(root, state)
     info = private(root, directory=True)
     # Unknown existing directories stay untouched, including no new lock file.
@@ -181,6 +195,7 @@ def installation(root: Path, *, features=(), development=None):
                 or not isinstance(state.get("install_id"), str)
                 or not re.fullmatch(r"[0-9a-f]{32}", state["install_id"])
                 or state.get("status") not in {"installing", "complete"}
+                or state.get("experimental_platform") != experimental_platform
                 or not isinstance(state.get("components"), dict) or not isinstance(state.get("files"), dict)
                 or state.get("features", []) not in ([], ["hermes"])
                 or not set(state["components"]).issubset({"app", "node", "openclaw", "hermes"})
@@ -439,11 +454,15 @@ def scoped_apparmor(root: Path):
     return target
 
 
-def isolation(root: Path, system_deps: bool):
+def isolation(root: Path, system_deps: bool, *, experimental_debian13=False):
+    if experimental_debian13 and system_deps:
+        raise InstallError("Debian 13 实验验收不能自动安装系统依赖或配置 AppArmor。")
     if system_deps:
         system_dependencies(root)
     bwrap = Path("/usr/bin/bwrap")
     if not bwrap.is_file():
+        if experimental_debian13:
+            raise InstallError("Debian 13 实验验收缺少预先准备的 bwrap；不会尝试 sudo 或系统策略修改。")
         raise InstallError("缺少 Ubuntu 隔离组件。请重新运行此安装器，加上 --system-deps。")
     code = "from yuanxingmu.cli import main;raise SystemExit(main())"
     try:
@@ -590,8 +609,9 @@ def desktop_entry(root: Path):
     target.chmod(0o600)
 
 
-def install(root: Path, *, system_deps=False, cache=None, shortcut=True, dev_wheel=None, dev_sha256=None):
-    check_environment(root)
+def install(root: Path, *, system_deps=False, cache=None, shortcut=True, dev_wheel=None, dev_sha256=None,
+            experimental_debian13=False):
+    check_environment(root, experimental_debian13=experimental_debian13, system_deps=system_deps)
     pins = json.loads(bundled("pins.json"))
     if pins["installer_version"] != VERSION or pins["runtime_version"] != RUNTIME:
         raise InstallError("安装器与固定版本记录不一致。")
@@ -599,7 +619,10 @@ def install(root: Path, *, system_deps=False, cache=None, shortcut=True, dev_whe
     features = ["hermes"] if local_wheel else pins.get("runtime_features", [])
     if features not in ([], ["hermes"]):
         raise InstallError("安装器的运行功能记录不受支持。")
-    with installation(root, features=features, development=local_wheel) as state:
+    with installation(root, features=features, development=local_wheel,
+                      experimental_platform="debian13" if experimental_debian13 else None) as state:
+        if experimental_debian13:
+            print("这是 Debian 13 实验验收候选，不代表已发布的发行版支持；不会修改系统隔离策略。", flush=True)
         if local_wheel is not None and (state["status"] == "complete" or state.get("development_wheel") != local_wheel):
             raise InstallError("开发 wheel 只能用于新目录，或使用同一 wheel 恢复未完成的开发安装；不会更换已有运行程序。")
         if state.get("development_wheel") and state["status"] != "complete" and local_wheel is None:
@@ -628,7 +651,8 @@ def install(root: Path, *, system_deps=False, cache=None, shortcut=True, dev_whe
         if use_hermes:
             require_hermes_app(root, pins)
         print("2/" + steps + " 检查这台电脑的实际隔离能力", flush=True)
-        bwrap = isolation(root, system_deps)
+        bwrap = (isolation(root, False, experimental_debian13=True) if experimental_debian13
+                 else isolation(root, system_deps))
         state["files"]["bwrap:" + str(bwrap)] = record(bwrap)
         save(root, state)
         print("3/" + steps + " 安装固定版本的 Node.js 与 OpenClaw（首次可能需要几分钟）", flush=True)
@@ -678,6 +702,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="元星木安装器：Ubuntu / WSL Ubuntu 24.04 x86_64 预览版")
     parser.add_argument("--install-root", type=Path, default=Path.home() / "yuanxingmu", help="Linux 家目录下的新子目录")
     parser.add_argument("--system-deps", action="store_true", help="允许通过 sudo 安装隔离组件、配置指定组件的 Ubuntu 权限")
+    parser.add_argument("--experimental-debian13", action="store_true", help="仅供 Debian 13 / 系统 Python 3.13 实机验收；要求依赖预置，不能与 --system-deps 同用")
     parser.add_argument("--download-cache", type=Path, help="可复用下载目录；所有文件仍需核对固定 SHA256")
     parser.add_argument("--no-shortcut", action="store_true", help="不创建 Linux 应用入口")
     parser.add_argument("--development-wheel", type=Path, help="仅本机开发验收：使用当前版本的本地 wheel，并安装 Hermes")
@@ -687,7 +712,8 @@ def main(argv=None):
     root = args.install_root.expanduser().absolute()
     try:
         result = install(root, system_deps=args.system_deps, cache=args.download_cache, shortcut=not args.no_shortcut,
-                         dev_wheel=args.development_wheel, dev_sha256=args.development_wheel_sha256)
+                         dev_wheel=args.development_wheel, dev_sha256=args.development_wheel_sha256,
+                         experimental_debian13=args.experimental_debian13)
         print(f"\n安装完成。打开工作台：\n{root / 'open-yuanxingmu'}\n", flush=True)
         frameworks = "OpenClaw 或 Hermes" if "hermes" in result.get("features", []) else "OpenClaw"
         print("进入后可以连接自己的模型、选择资料并打开 " + frameworks + "。请保留工作台终端；首次模型连接仍需自行填写。", flush=True)

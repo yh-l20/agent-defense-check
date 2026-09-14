@@ -32,13 +32,21 @@ def snapshot(root):
     return result
 
 
+def installer_command(installer, root, *, experimental_debian13=False):
+    command = ["/usr/bin/python3", "-I", str(installer), "--install-root", str(root), "--no-shortcut"]
+    if experimental_debian13:
+        command.append("--experimental-debian13")
+    return command
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--install-root", required=True, type=Path)
     parser.add_argument("--installer", required=True, type=Path)
+    parser.add_argument("--experimental-debian13", action="store_true", help="将 Debian 13 实验验收开关传给同一候选安装器")
     args = parser.parse_args()
     before = snapshot(args.install_root)
-    subprocess.run(["/usr/bin/python3", "-I", str(args.installer), "--install-root", str(args.install_root), "--no-shortcut"],
+    subprocess.run(installer_command(args.installer, args.install_root, experimental_debian13=args.experimental_debian13),
                    check=True, timeout=120)
     unchanged = snapshot(args.install_root) == before
     print(json.dumps({"passed": unchanged, "saved_work_and_bound_runtime_unchanged": unchanged}))
